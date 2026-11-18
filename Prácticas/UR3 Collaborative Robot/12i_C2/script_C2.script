@@ -1,0 +1,301 @@
+# ---------------------------------------------------
+# Initialization of variables
+
+pi = 3.141592653589793 # math.pi
+
+robot = [0,   0,     0.7] # m
+tumor = [0,   -0.60,  0.82] # m
+tumor = [
+          tumor[0]-robot[0],
+          tumor[1]-robot[1],
+          tumor[2]-robot[2]
+        ]
+
+center = [0, 0, 0.3]
+
+semi_major = 0.25 # m
+semi_minor = 0.20 # m
+
+steps = 50
+acc = 0.15
+vel = 0.3
+blend = 0.01 # rad
+
+max_joint_jump = 0.5 # rad
+epsilon = 0.000001
+
+# ---------------------------------------------------
+# Auxiliary functions vector computations
+
+def dot_product(u, v):
+  return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+end
+
+def cross_product(u, v):
+  return [
+    u[1]*v[2] - u[2]*v[1],
+    u[2]*v[0] - u[0]*v[2],
+    u[0]*v[1] - u[1]*v[0]
+  ]
+end
+
+def norm_vec(v):
+  return sqrt(dot_product(v, v))
+end
+
+def normalization(v):
+  n = norm_vec(v)
+  if n < epsilon:
+    return [0.0, 0.0, 0.0]
+  end
+  return [v[0]/n, v[1]/n, v[2]/n]
+end
+
+def joint_distance(q1, q2):
+  d0 = q1[0] - q2[0]
+  d1 = q1[1] - q2[1]
+  d2 = q1[2] - q2[2]
+  d3 = q1[3] - q2[3]
+  d4 = q1[4] - q2[4]
+  d5 = q1[5] - q2[5]
+
+  return sqrt(d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5)
+end
+
+# ---------------------------------------------------
+# Program functions
+
+def stable_xaxis_from_zaxis(zaxis):
+  ref = [0.0, 0.0, 1.0]
+
+  xaxis = cross_product(ref, zaxis)
+
+  if norm_vec(xaxis) < epsilon:
+    ref = [1.0, 0.0, 0.0]
+    xaxis = cross_product(ref, zaxis)
+  end
+
+  return normalization(xaxis)
+end
+
+def rotvec_from_axes(xaxis, yaxis, zaxis):
+  trace = xaxis[0] + yaxis[1] + zaxis[2]
+  c = (trace - 1.0) / 2.0
+
+  if c > 1.0:
+    c = 1.0
+  end
+  if c < -1.0:
+    c = -1.0
+  end
+
+  angle = acos(c)
+
+  if angle < epsilon:
+    return [0.0, 0.0, 0.0]
+  end
+
+  s = sin(angle)
+
+  if ((s < epsilon) and (s > -epsilon)):
+    return [0.0, 0.0, 0.0]
+  end
+
+  rx = ((yaxis[2] - zaxis[1]) / (2.0*s)) * angle
+  ry = ((zaxis[0] - xaxis[2]) / (2.0*s)) * angle
+  rz = ((xaxis[1] - yaxis[0]) / (2.0*s)) * angle
+
+  return [rx, ry, rz]
+end
+
+def make_pose(pos, tan):
+  # Z axis to tumor
+  zaxis = [
+            tumor[0] - pos[0],
+            tumor[1] - pos[1],
+            tumor[2] - pos[2]
+          ]
+  zaxis = normalization(zaxis)
+
+  # X axis tangent to ellipse
+  xaxis = normalization(tan)
+
+  # Avoid tangent and Z axis alignment
+  align = dot_product(xaxis, zaxis)
+
+  if ((align > 0.95) or (align < -0.95)):
+    xaxis = stable_xaxis_from_zaxis(zaxis)
+  else:
+    proj = dot_product(xaxis, zaxis)
+
+    xaxis = [
+      xaxis[0] - proj*zaxis[0],
+      xaxis[1] - proj*zaxis[1],
+      xaxis[2] - proj*zaxis[2]
+    ]
+
+    if norm_vec(xaxis) < epsilon:
+      xaxis = stable_xaxis_from_zaxis(zaxis)
+    else:
+      xaxis = normalization(xaxis)
+    end
+  end
+
+  # Y axis
+  yaxis = cross_product(zaxis, xaxis)
+  yaxis = normalization(yaxis)
+
+  # Recompute X axis to reduce numerical error
+  xaxis = cross_product(yaxis, zaxis)
+  xaxis = normalization(xaxis)
+
+  rot = rotvec_from_axes(xaxis, yaxis, zaxis)
+
+  return p[pos[0], pos[1], pos[2], rot[0], rot[1], rot[2]]
+end
+
+def ellipse_pose(ux, uy, uz, vx, vy, vz, t):
+  cos_t = cos(t)
+  sin_t = sin(t)
+
+  # Vectorial parametrization of ellipse
+  pos = [
+    tumor[0] + center[0] + semi_major*cos_t*ux + semi_minor*sin_t*vx,
+    tumor[1] + center[1] + semi_major*cos_t*uy + semi_minor*sin_t*vy,
+    tumor[2] + center[2] + semi_major*cos_t*uz + semi_minor*sin_t*vz
+  ]
+
+  # Derivative of Vectorial parametrization over Theta
+  tan = [
+    -semi_major*sin_t*ux + semi_minor*cos_t*vx,
+    -semi_major*sin_t*uy + semi_minor*cos_t*vy,
+    -semi_major*sin_t*uz + semi_minor*cos_t*vz
+  ]
+
+  return make_pose(pos, tan)
+end
+
+def move_to_start_pose(pose_i, qnear):
+  if get_inverse_kin_has_solution(pose_i, qnear):
+    q_i = get_inverse_kin(pose_i, qnear)
+
+    if is_within_safety_limits(pose_i, qnear):
+      movej(q_i, a=acc, v=vel)
+      sleep(0.2)
+      return get_actual_joint_positions()
+    else:
+      popup("Start pose outside safety limits", title="Error", error=True, blocking=True)
+      halt
+    end
+  else:
+    popup("No IK solution for start pose", title="Error", error=True, blocking=True)
+    halt
+  end
+
+  return qnear
+end
+
+def safe_movel(pose_i, qnear, b):
+  if get_inverse_kin_has_solution(pose_i, qnear):
+    q_i = get_inverse_kin(pose_i, qnear)
+
+    if joint_distance(q_i, qnear) > max_joint_jump:
+      popup("Large joint jump detected")
+      halt
+    end
+
+    if is_within_safety_limits(pose_i, qnear):
+      movel(pose_i, a=acc, v=vel, r=b)
+      return q_i
+    else:
+      popup("Pose outside safety limits")
+      halt
+    end
+  else:
+    popup("No inverse kinematics solution")
+    halt
+  end
+
+  return qnear
+end
+
+# Axes of major (u) and minor (v) axes of ellipse
+# Range of angles to compute ellipse (theta_start, theta_end) = (ts, te)
+def do_ellipse(ux, uy, uz, vx, vy, vz, ts, te):
+  qnear = get_actual_joint_positions()
+
+  # Init ellipse. 1st position
+  start_pose = ellipse_pose(ux, uy, uz, vx, vy, vz, ts)
+  qnear = move_to_start_pose(start_pose, qnear)
+
+  # Do ellipse. ith position
+  i = 1
+  while i <= steps:
+    t = ts + (te - ts) * i / steps # theta
+    pose_i = ellipse_pose(ux, uy, uz, vx, vy, vz, t)
+
+    b = blend
+    if i == steps:
+      b = 0
+    end
+
+    qnear = safe_movel(pose_i, qnear, b)
+
+    i = i + 1
+  end
+end
+
+# ---------------------------------------------------
+# Main function
+
+def radiotherapy():
+  home_joints = [-71.23, -85.07, -59.08, -126.47, 91.23, -71.23]
+  i = 0
+  while i < 6:
+    home_joints[i] = home_joints[i] * pi / 180
+    i = i + 1
+  end
+
+  # XY
+  movej(home_joints, a=acc, v=vel*2, t=0, r=0)
+  do_ellipse(
+              1, 0, 0,          # X axis (major)
+              0, 1, 0,          # Y axis (minor)
+              0, pi/2.1         # Angle range
+            )
+  # XY
+  movej(home_joints, a=acc, v=vel*2, t=0, r=0)
+  do_ellipse(
+              1, 0, 0,          # X axis (major)
+              0, 1, 0,          # Y axis (minor)
+              pi-pi/2.1, pi     # Angle range
+            )
+  # YZ
+  movej(home_joints, a=acc, v=vel*2, t=0, r=0)
+  do_ellipse(
+              0, 1, 0,          # Y axis (major)
+              0, 0, 1,          # Z axis (minor)
+              -pi/8, pi/2.1     # Angle range
+            )
+
+  # YZ rotated +45 degrees around Z
+  movej(home_joints, a=acc, v=vel*2, t=0, r=0)
+  do_ellipse(
+              -pi/4, pi/4, 0,   # rotated axis (major)
+               0, 0, 1,         # Z axis (minor)
+              -pi/8, pi/2.1     # Angle range
+            )
+
+  # YZ rotated -45 degrees around Z
+  movej(home_joints, a=acc, v=vel*2, t=0, r=0)
+  do_ellipse(
+               pi/4, pi/4, 0,   # rotated axis (major)
+               0, 0, 1,         # Z axis (minor)
+              -pi/8, pi/2.1     # Angle range
+            )
+end
+
+# ---------------------------------------------------
+# Call program
+
+radiotherapy()
